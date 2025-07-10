@@ -3,8 +3,6 @@ name: Android CI
 on:
   push:
     branches: ["develop"]
-  pull_request:
-    branches: ["develop"]
   release:
     types: [published]
   workflow_dispatch:
@@ -18,30 +16,31 @@ jobs:
         run: |
           sudo timedatectl set-timezone Asia/Shanghai
           echo "Current time: $(date)"
+          
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
+          fetch-depth: 0  # 获取完整提交历史
+          
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: "zulu"
           cache: gradle
-
+          
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
           gradle-version: wrapper
-
+          
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
-
+          
       - name: Build with Gradle
         run: ./gradlew assembleNormalRelease assembleCompatibleRelease -Pversion=${{ github.ref_name }}
-
+        
       - name: Locate APKs and Set Outputs
         id: locate_apks
         run: |
@@ -49,11 +48,13 @@ jobs:
           compatible_apk=$(find app/build/outputs/apk/compatible/release -name "*.apk" | head -n 1)
           echo "normal_apk=$normal_apk" >> $GITHUB_OUTPUT
           echo "compatible_apk=$compatible_apk" >> $GITHUB_OUTPUT
+          
       - name: Copy APKs to staging for signing
         run: |
           mkdir -p app/build/outputs/apk/all
           cp "${{ steps.locate_apks.outputs.normal_apk }}" app/build/outputs/apk/all/
           cp "${{ steps.locate_apks.outputs.compatible_apk }}" app/build/outputs/apk/all/
+          
       - name: Sign APKs
         id: sign_apks
         uses: ilharp/sign-android-release@v2
@@ -64,7 +65,7 @@ jobs:
           keyStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
           buildToolsVersion: 36.0.0
-
+          
       - name: Extract Signed APK Paths
         id: extract_apks
         run: |
@@ -76,103 +77,96 @@ jobs:
               echo "signed_compatible=$file" >> $GITHUB_OUTPUT
             fi
           done
-      - name: Upload APK - Compatible
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-compatible
-          path: ${{ steps.extract_apks.outputs.signed_compatible }}
-
-      - name: Upload APK - Normal
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-normal
-          path: ${{ steps.extract_apks.outputs.signed_normal }}
-
-      - name: Extract file names
+          
+      - name: Extract file names and version
         id: extract_info
         run: |
           normal_file=$(basename "${{ steps.extract_apks.outputs.signed_normal }}")
           compatible_file=$(basename "${{ steps.extract_apks.outputs.signed_compatible }}")
-          # 提取版本号（以"Normal-"或"Compatible-"之后的部分为起点，以"-signed"之前的内容为终点）
-          version=$(echo "$normal_file" | sed -E 's/.*-(Normal|Compatible)-(.*)-signed\.apk/\2/')
+          
+          # 从文件名提取版本号
+          version=$(echo "$normal_file" | sed -E 's/.*-([0-9]+\.[0-9]+\.[0-9]+)-.*/\1/')
+          
           echo "normal_file=$normal_file" >> $GITHUB_OUTPUT
           echo "compatible_file=$compatible_file" >> $GITHUB_OUTPUT
           echo "version=$version" >> $GITHUB_OUTPUT
+          
       - name: Generate APKS Checksum
         run: |
-          sha256sum ${{ steps.extract_apks.outputs.signed_normal }} > CHECKSUMS-Sesame-Normal-${{ steps.extract_info.outputs.version }}.${{ env.SHORT_SHA }}-signed.apk.sha256
-          sha256sum ${{ steps.extract_apks.outputs.signed_compatible }} > CHECKSUMS-Sesame-Compatible-${{ steps.extract_info.outputs.version }}.${{ env.SHORT_SHA }}-signed.apk.sha256
+          sha256sum ${{ steps.extract_apks.outputs.signed_normal }} > CHECKSUMS-Sesame-Normal-${{ steps.extract_info.outputs.version }}.sha256
+          sha256sum ${{ steps.extract_apks.outputs.signed_compatible }} > CHECKSUMS-Sesame-Compatible-${{ steps.extract_info.outputs.version }}.sha256
+          
       - name: Get Commit Details
         id: commit_details
         run: |
-          COMMIT_MESSAGE_BODY=$( \
-            if [[ "${{ github.event_name }}" == "push" ]]; then \
-              echo "🔨 $(git rev-list --count ${{ github.event.before }}..${{ github.event.after }}) new commits to ${{ github.repository }}:${{ github.ref_name }} ([compare view](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.event.after }}))"; \
-              echo ""; \
-              git log --format="  %h ([view commit](https://github.com/${{ github.repository }}/commit/%H)): %s by %an" ${{ github.event.before }}..${{ github.event.after }}; \
-            elif [[ "${{ github.event_name }}" == "pull_request" ]]; then \
-              echo "📦 Pull Request #${{ github.event.number }} for ${{ github.repository }}: ${{ github.head_ref }} -> ${{ github.base_ref }} ([view PR](https://github.com/${{ github.repository }}/pull/${{ github.event.number }}))"; \
-              echo ""; \
-              echo "Commits:"; \
-              git log --format="  %h ([view commit](https://github.com/${{ github.repository }}/commit/%H)): %s by %an" ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}; \
-            elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then \
-              echo "⚙️ Manual workflow run on ${{ github.ref_name }} by ${{ github.actor }}"; \
-              echo ""; \
-              echo "Latest commit:"; \
-              git log -1 --format="  %h ([view commit](https://github.com/${{ github.repository }}/commit/%H)): %s by %an"; \
-            else \
-              echo "ℹ️ Commit information for ${{ github.event_name }} event on ${{ github.ref_name }} by ${{ github.actor }}:"; \
-              echo ""; \
-              git log -1 --format="  %h ([view commit](https://github.com/${{ github.repository }}/commit/%H)): %s by %an"; \
-            fi \
+          # 获取当前发布的标签名
+          CURRENT_TAG="${{ github.event.release.tag_name || 'HEAD' }}"
+          
+          # 获取上一个标签（用于比较）
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "$CURRENT_TAG"^ 2>/dev/null || echo "")
+          
+          COMMIT_MESSAGE_BODY=$(
+            if [[ "${{ github.event_name }}" == "push" ]]; then
+              echo "🔨 $(git rev-list --count ${{ github.event.before }}..${{ github.event.after }}) new commits to ${{ github.repository }}:${{ github.ref_name }}"
+              echo "[Compare changes](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.event.after }})"
+              echo ""
+              git log --format="* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by %an" ${{ github.event.before }}..${{ github.event.after }} --no-merges
+              
+            elif [[ "${{ github.event_name }}" == "release" ]]; then
+              if [ -z "$PREVIOUS_TAG" ]; then
+                # 没有找到前一个标签（首次发布）
+                echo "✨ Initial release: $CURRENT_TAG"
+                echo ""
+                echo "### All commits:"
+                git log --format="* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by %an" --no-merges
+              else
+                # 比较两个标签之间的提交
+                echo "✨ Changes from $PREVIOUS_TAG to $CURRENT_TAG"
+                echo "[Compare changes](https://github.com/${{ github.repository }}/compare/$PREVIOUS_TAG...$CURRENT_TAG)"
+                echo ""
+                git log --format="* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by %an" --no-merges "$PREVIOUS_TAG..$CURRENT_TAG"
+              fi
+              
+            elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+              echo "⚙️ Manual workflow run on ${{ github.ref_name }} by ${{ github.actor }}"
+              echo ""
+              echo "### Latest commit:"
+              git log -1 --format="* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by %an"
+              
+            else
+              echo "ℹ️ Commit information for ${{ github.event_name }} event on ${{ github.ref_name }}:"
+              echo ""
+              git log -1 --format="* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by %an"
+            fi
           )
+          
           echo "COMMIT_MESSAGE_BODY<<EOF" >> $GITHUB_OUTPUT
           echo "$COMMIT_MESSAGE_BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-      - name: Create Tag from Version
-        if: startsWith(github.ref, 'refs/heads/main') && github.event_name == 'push'
-        run: |
-          VERSION_TAG="v${{ steps.extract_info.outputs.version }}"
-          echo "Creating tag: $VERSION_TAG"
-          git tag "$VERSION_TAG"
-          git push origin "$VERSION_TAG"
-      - name: Upload Assets to Source Release
+          
+      - name: Upload Assets to Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.event.release.tag_name || steps.extract_info.outputs.version }} # 发布的名称。默认为标签名称
+          # 使用手动创建的标签名或自动提取的版本号
+          tag_name: ${{ github.event.release.tag_name || steps.extract_info.outputs.version }}
+          name: Release ${{ github.event.release.tag_name || steps.extract_info.outputs.version }}
           files: |
-            ${{ steps.extract_apks.outputs.signed_compatible }}
             ${{ steps.extract_apks.outputs.signed_normal }}
-            CHECKSUMS-Sesame-Normal-${{ steps.extract_info.outputs.version }}.${{ env.SHORT_SHA }}-signed.apk.sha256
-            CHECKSUMS-Sesame-Compatible-${{ steps.extract_info.outputs.version }}.${{ env.SHORT_SHA }}-signed.apk.sha256
-          tag_name: ${{ steps.extract_info.outputs.version}}
+            ${{ steps.extract_apks.outputs.signed_compatible }}
+            CHECKSUMS-Sesame-Normal-${{ steps.extract_info.outputs.version }}.sha256
+            CHECKSUMS-Sesame-Compatible-${{ steps.extract_info.outputs.version }}.sha256
           draft: false
-          append_body: true
-          generate_release_notes: true
+          generate_release_notes: false
           body: |
-            ## ✨What's Changed
+            ## 🚀 Release Notes
+            
             ${{ steps.commit_details.outputs.COMMIT_MESSAGE_BODY }}
-            > ## 下载说明
-              * Normal 为正常版本,适用于`Android 8.0`及以上的系统
-              * Compatible 为兼容版本,适用于`Android 7.0`及以下的系统,最低支持`Android 5.1`
-            > ~~墙内不再更新~~ 倒卖必死全家
-      - name: Sync Release to Target Repository
-        uses: softprops/action-gh-release@v2
-        with:
-          repository: Xposed-Modules-Repo/fansirsqi.xposed.sesame # 目标仓库的拥有者和仓库名称
-          name: ${{ github.event.release.tag_name || steps.extract_info.outputs.version }} # 发布的名称。默认为标签名称
-          files: |
-            ${{ steps.sign_normal_apk.outputs.signedFile }}
-            ${{ steps.sign_compatible_apk.outputs.signedFile }}
-            CHECKSUMS-Sesame-Normal-${{ steps.extract_info.outputs.version }}.${{ env.SHORT_SHA }}-signed.apk.sha256
-            CHECKSUMS-Sesame-Compatible-${{ steps.extract_info.outputs.version }}.${{ env.SHORT_SHA }}-signed.apk.sha256
-          token: ${{ secrets.TARGET_REPO_PAT }}
-          tag_name: ${{ steps.extract_info.outputs.version }}
-          draft: false
-          prerelease: ${{ steps.pre_release.outputs.IS_PRERELEASE }}
-          append_body: false
-          make_latest: true
-          body: |
-            📦 本 Release 同步自源仓库 [Sesame-TK](https://github.com/${{ github.repository }})
-            ✨ **更新内容**:
-            ${{ github.event.release.body || '无更新说明' }}
+            
+            ---
+            
+            ### 📥 Download Information
+            * **Normal Version**: Android 8.0+ 
+            * **Compatible Version**: Android 5.1-7.1
+            
+            ### 🔒 Verification
+            Verify APK integrity with SHA256 checksums
